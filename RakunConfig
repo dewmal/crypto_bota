@@ -1,0 +1,12 @@
+name: Environment Name
+version: 1.0.0
+buildversion: 1
+agents:
+  order_agent:
+    name: OrderAgent
+    code: agents/order_agent.py
+
+workdir: E:\Research\Rakun\crypto_trader
+communicationurl: "127.0.0.1:52154"
+requiredfiles: [ requirements.txt ]
+displayserverurl: "127.0.0.1:42487"

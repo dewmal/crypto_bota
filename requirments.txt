@@ -1,0 +1,6 @@
+python-dotenv
+python-binance
+pydantic
+motor
+pandas
+numpy

@@ -88,6 +88,34 @@ class AgentManager:
             log.exception("error: {}".format(e), e)
             await self.retry(self)
 
+    async def subscribe_for_sync_time(self, time_subscriber):
+        try:
+            async with grpc.aio.insecure_channel(self.address) as channel:
+                stub = agent_pb2_grpc.BroadcastStub(channel)
+
+                now = time.time()
+                seconds = int(now)
+                nanos = int((now - seconds) * 10 ** 9)
+
+                connect = agent_pb2.Connect(
+                    user=self.agent,
+                    active=True,
+                    timestamp=Timestamp(seconds=seconds, nanos=nanos)
+                )
+
+                stream = stub.SyncTime(connect)
+                async for td in stream:
+                    try:
+                        timestamp_dt = datetime.datetime.fromtimestamp(td.timestamp.seconds + td.timestamp.nanos / 1e9)
+                        await time_subscriber(timestamp_dt)
+                    except Exception as e:
+                        log.exception("error: {}".format(e), e)
+                        raise e
+
+        except Exception as e:
+            log.exception("error: {}".format(e), e)
+            await self.retry(self)
+
     async def __process_message(self, message: agent_pb2.Message, message_processor):
         content = {}
         for c in message.content:
@@ -109,6 +137,7 @@ class AgentWrapper:
         self.exit = exit
         self._agent_ = agent
         self._agent_.publish = publish
+        self._agent_.time_delta = 0
         self._agent_.exit = self.exit
 
     async def start_agent(self):
@@ -144,17 +173,20 @@ class AgentWrapper:
                 log.exception(e)
                 raise e
 
+    async def sync_time(self, time_delta):
+        self._agent_.time_delta = time_delta
+
     async def run(self):
         await self.start_agent()
         await self.execute_agent()
         await self.stop_agent()
 
 
-
-
 async def run(comm_server_url, agent_obj, agent_id, agent_name) -> None:
     async def run_agent_manager(agm: AgentManager, agent: AgentWrapper):
-        tasks = [agent.run(), agm.subscribe_for_manager(agent.accept_message)]
+        tasks = [agent.run(),
+                 agm.subscribe_for_sync_time(agent.sync_time),
+                 agm.subscribe_for_manager(agent.accept_message)]
         tsk = asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
         log.info(f"AGENT {agent_id} STARTED")
         await tsk

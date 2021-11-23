@@ -19,5 +19,13 @@ class DBManager:
         return self.db.snapshots
 
     @property
+    def orders(self):
+        return self.db.orders
+
+    @property
+    def placed_orders(self):
+        return self.db.placed_orders
+
+    @property
     def signals(self):
         return self.db.signals

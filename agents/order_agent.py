@@ -1,38 +1,77 @@
 import asyncio
 import logging
 import os
+from typing import Optional, List
 
+import numpy as np
+import pandas as pd
 from binance import AsyncClient, Client
 from dotenv import load_dotenv
 
-from analyser.order_handler import OrderHandler
+from agents import Agent
+from analyser.algo.order_algo import OrderAlgo, OrderExecutor
+from analyser.algo.simple_order_algo import SimpleOrderAlgo
+from data.account import Balance, SymbolInfo, AccountOrder, Order
 from data.tick import MiniTicker
 from db_manager import DBManager
-import pandas as pd
-import numpy as np
-from agents import Agent
-from matplotlib import pyplot as plt
 
 log = logging.getLogger(Agent.OrderAgent)
 
 load_dotenv()
 
 
-class OrderAgent:
+class OrderAgent(OrderExecutor):
     client: AsyncClient
     db_manager: DBManager
+    info: SymbolInfo
+    base_asset: Balance
+    quote_asset: Balance
+    orders: List[Order]
+    update_window_with_order: float
+    update_window_without_order: float
 
     def __init__(self, *args, **kwargs):
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
-        self.selected_pair = "CHESSUSDT"
+        self.selected_pair = "AMPUSDT"
         self.db_manager = DBManager()
         self.order_point = None
-        self.profit_margin = 0.05
+        self.profit_margin = 1.5
+        self.agency_fee = 0.02
+        self.base_asset_in_hand = 11
+        self.update_window_without_order = 15
+        self.update_window_with_order = 1
+        self.order_algo: OrderAlgo = SimpleOrderAlgo(
+            symbol=self.selected_pair,
+            order_executor=self,
+            options={
+                "p_ab": 0.6,
+                "p_bc": 0.3,
+                "p_de": 1.5,
+                "p_ef": 0.1,
+            }
+        )
 
     async def start(self):
         await self.db_manager.init()
         self.client = await AsyncClient.create(self.api_key, self.secret_key)
+        await self.update()
+
+    async def update(self):
+        orders = await self.client.get_open_orders(symbol=self.selected_pair)
+        log.info(f"{len(orders)} open orders")
+        self.orders = [AccountOrder(**o) for o in orders]
+
+        info: Optional[dict] = await self.client.get_symbol_info(self.selected_pair)
+        self.info: SymbolInfo = SymbolInfo(**info)
+
+        balance = await self.client.get_asset_balance(asset=self.info.baseAsset)
+        self.base_asset: Balance = Balance(**balance)
+
+        balance = await self.client.get_asset_balance(asset=self.info.quoteAsset)
+        self.quote_asset: Balance = Balance(**balance)
+
+        log.info(f"{self.quote_asset=} {self.base_asset=}")
 
     async def execute(self, *args, **kwargs):
         while True:
@@ -45,35 +84,65 @@ class OrderAgent:
             history_list = np.array(history_list)
             history_data = pd.DataFrame(data=history_list[:, 1:6][::-1],
                                         columns=["open", "high", "low", "close", "volume"])
-            # log.info(f"{history_data.head()}")
-
             w_data = history_data["close"].astype(np.float).values
 
-            if self.order_point is None:
-                buy_point, b_points = OrderHandler().identify_buy_point(w_data, p_ab=0.1, p_bc=0.2)
-                log.info(f"{buy_point=} {b_points=}")
-                if buy_point:
-                    if self.order_point is None:
-                        self.order_point = ticker
-                        plt.title("BUY POINT")
-                        plt.plot(w_data)
-                        plt.scatter(b_points, w_data[b_points])
-                        plt.show()
+            self.orders = await self.order_algo.update(w_data, ticker)
+
+            if len(self.orders) > 0:
+                await asyncio.sleep(self.update_window_with_order)
             else:
-                sell_point, s_points = OrderHandler().identify_sell_point(w_data, p_de=0.5, p_ef=0.1)
+                await asyncio.sleep(self.update_window_without_order)
 
-                if sell_point:
-                    sell_point = sell_point + 0
-                    if self.order_point is not None:
-                        current_price = ticker.close_price
-                        order_place_price = self.order_point.close_price
-                        profit = (current_price - order_place_price) / order_place_price
-                        if profit > self.profit_margin:
-                            self.order_point = None
-                            plt.title("SELL POINT")
-                            plt.plot(w_data)
-                            plt.scatter(s_points, w_data[s_points])
-                            plt.show()
-                            print(f"BUY {order_place_price} SELL {current_price} PROFIT {profit}%")
+    async def on_buy_order(self, ticker: MiniTicker) -> Order:
+        log.info("Place Buy Request")
+        decimals = self.check_decimals()
+        quantity = self.base_asset_in_hand / ticker.close_price
+        quantity += quantity * (100 + self.agency_fee) / 100
+        quantity = round(quantity, decimals)
+        log.info(f"{ticker.symbol=} {ticker.close_price=} {quantity=}")
 
-        await asyncio.sleep(60)
+        res = await self.client.order_market_buy(symbol=self.selected_pair, quantity=quantity)
+        self.db_manager.placed_orders.insert_one(res)
+        await self.update()
+        order = Order(
+            symbol=self.selected_pair,
+            orderId=res['orderId'],
+            qty=quantity,
+            price=ticker.close_price,
+            side="BUY",
+            time=self.time_delta,
+            is_open=True,
+        )
+        await self.db_manager.orders.insert_one(order.dict)
+        return order
+
+    async def on_sell_order(self, order: Order, tick: MiniTicker) -> Order:
+        log.info(f"Place Sell Request")
+        current_price = tick.close_price
+        order_place_price = order.price
+        profit = (current_price - order_place_price) * 100 / order_place_price
+        log.info(f"{tick.symbol} {profit=}")
+
+        if profit > self.profit_margin:
+            quantity = round(order.qty, self.check_decimals())
+            res = await self.client.order_market_sell(symbol=order.symbol, quantity=quantity)
+            self.db_manager.placed_orders.insert_one(res)
+            self.order_point = None
+            await self.update()
+            print(f"BUY {order_place_price} SELL {current_price} PROFIT {profit}%")
+
+        order.is_open = False
+        return order
+
+    def check_decimals(self):
+        val = self.info.filters[2]['stepSize']
+        decimal = 0
+        is_dec = False
+        for c in val:
+            if is_dec is True:
+                decimal += 1
+            if c == '1':
+                break
+            if c == '.':
+                is_dec = True
+        return decimal

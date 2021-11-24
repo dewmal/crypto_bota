@@ -5,6 +5,7 @@ import os
 import pickle
 import time
 from importlib.machinery import SourceFileLoader
+from typing import Any
 
 import click
 import grpc
@@ -209,7 +210,9 @@ def main(stack_name, id, host, name, source, init_params):
     if os.path.exists(source):
         agent_source_code = SourceFileLoader("", source).load_module()
         agent_class = getattr(agent_source_code, name)
-        agent_obj = agent_class(init_params=init_params)
+        params = {k: v for k, v in init_params}
+        log.info(f"{type(init_params)}")
+        agent_obj = agent_class(**params)
         asyncio.run(run(host, agent_obj, id, name))
 
 

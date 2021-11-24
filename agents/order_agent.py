@@ -30,13 +30,13 @@ class OrderAgent(OrderExecutor):
     update_window_with_order: float
     update_window_without_order: float
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, symbol, *args, **kwargs):
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
-        self.selected_pair = "AMPUSDT"
+        self.selected_pair = symbol  # "NBSUSDT"
         self.db_manager = DBManager()
         self.order_point = None
-        self.profit_margin = 1.5
+        self.profit_margin = 0.75
         self.agency_fee = 0.02
         self.base_asset_in_hand = 11
         self.update_window_without_order = 15
@@ -45,9 +45,9 @@ class OrderAgent(OrderExecutor):
             symbol=self.selected_pair,
             order_executor=self,
             options={
-                "p_ab": 0.6,
-                "p_bc": 0.3,
-                "p_de": 1.5,
+                "p_ab": 0.3,
+                "p_bc": 0.5,
+                "p_de": 0.5,
                 "p_ef": 0.1,
             }
         )
@@ -61,6 +61,13 @@ class OrderAgent(OrderExecutor):
         orders = await self.client.get_open_orders(symbol=self.selected_pair)
         log.info(f"{len(orders)} open orders")
         self.orders = [AccountOrder(**o) for o in orders]
+
+        orders_cursor = self.db_manager.orders.find({'is_open': True, 'symbol': self.selected_pair})
+        orders = await orders_cursor.to_list(length=100)
+        orders = [Order(**o) for o in orders]
+        log.info(f"{len(orders)} open orders in db")
+        log.info(f"{orders}")
+        await self.order_algo.update_orders(orders)
 
         info: Optional[dict] = await self.client.get_symbol_info(self.selected_pair)
         self.info: SymbolInfo = SymbolInfo(**info)
@@ -95,11 +102,17 @@ class OrderAgent(OrderExecutor):
 
     async def on_buy_order(self, ticker: MiniTicker) -> Order:
         log.info("Place Buy Request")
+        await self.update()
         decimals = self.check_decimals()
         quantity = self.base_asset_in_hand / ticker.close_price
         quantity += quantity * (100 + self.agency_fee) / 100
         quantity = round(quantity, decimals)
         log.info(f"{ticker.symbol=} {ticker.close_price=} {quantity=}")
+
+        price_to_buy = ticker.close_price * quantity
+        if price_to_buy > self.quote_asset.free:
+            log.info("Not Enough Money")
+            return None
 
         res = await self.client.order_market_buy(symbol=self.selected_pair, quantity=quantity)
         self.db_manager.placed_orders.insert_one(res)
@@ -113,7 +126,9 @@ class OrderAgent(OrderExecutor):
             time=self.time_delta,
             is_open=True,
         )
-        await self.db_manager.orders.insert_one(order.dict)
+        res = await self.db_manager.orders.insert_one(order.dict_without_id)
+        log.info(f"{res=}")
+        order._id = res.inserted_id
         return order
 
     async def on_sell_order(self, order: Order, tick: MiniTicker) -> Order:
@@ -130,8 +145,8 @@ class OrderAgent(OrderExecutor):
             self.order_point = None
             await self.update()
             print(f"BUY {order_place_price} SELL {current_price} PROFIT {profit}%")
-
-        order.is_open = False
+            order.is_open = False
+            await self.db_manager.orders.replace_one({'_id': order._id}, {**order.dict_without_id, 'is_open': False})
         return order
 
     def check_decimals(self):

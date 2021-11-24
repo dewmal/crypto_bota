@@ -64,10 +64,18 @@ class Order:
     side: str
     time: datetime.datetime
     is_open: bool = True
+    _id: str = None
 
     @property
     def dict(self):
-        return asdict(self)
+        d = asdict(self)
+        return d
+
+    @property
+    def dict_without_id(self):
+        d = asdict(self)
+        del d['_id']
+        return d
 
 
 """

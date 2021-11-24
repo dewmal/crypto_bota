@@ -34,38 +34,37 @@ class OrderAlgo(ABC):
         profit = 0
         for order in self.orders:
             profit += (tick.close_price - order.price) * 100 / order.price
-        return profit
+        return round(profit, 4)
+
+    async def update_orders(self, orders):
+        self.orders = [*self.orders, *orders]
 
     async def update(self, history_data, ticker: MiniTicker) -> List[Order]:
-        total_profit = self.on_hand_profit(ticker)
-        if total_profit > 0:
-            log.info(f"{self.symbol} has {total_profit}% profit")
-
         if len(self.orders) > 0:
+            total_profit = self.on_hand_profit(ticker)
+            log.info(f"{self.symbol} has {total_profit}% profit")
             sell_point, other_points = await self.get_sell_point(history_data, self.options)
             if sell_point:
                 await self.sell(ticker)
-
-        buy_point, other_points = await self.get_buy_point(history_data, self.options)
-        log.info(f"{buy_point=} , {len(self.orders)=},{self.number_of_orders=}")
-        if buy_point and len(self.orders) < self.number_of_orders:
-            await self.buy(ticker)
-
+        if len(self.orders) < self.number_of_orders:
+            buy_point, other_points = await self.get_buy_point(history_data, self.options)
+            log.info(f"{buy_point=} , {len(self.orders)=},{self.number_of_orders=}")
+            if buy_point:
+                await self.buy(ticker)
+        log.info(f"{len(self.orders)=}")
         return self.orders
 
     async def buy(self, ticker: MiniTicker):
         order = await self.on_buy(ticker)
         if order:
-            self.orders.append(order)
+            self.orders = [*self.orders, order]
             log.info(f"{len(self.orders)=},{self.number_of_orders=}")
-        await asyncio.sleep(0.01)
 
     async def sell(self, ticker: MiniTicker):
         for order in self.orders:
             order = await self.on_sell(order, ticker)
             if not order.is_open:
-                self.orders.remove(order)
-        await asyncio.sleep(0.01)
+                self.orders = [o for o in self.orders if o.orderId != order.orderId]
 
     @abstractmethod
     async def get_buy_point(self, price_list, options: dict):
